@@ -23,7 +23,7 @@ Jobs 维护的 Windows 11 镜像资料子仓。父仓 [WindowsOS](../README.md) 
 
 | 路径 | 职责 |
 | --- | --- |
-| [MacOS](./MacOS/README.md) | `split.command` 与 `merge.command`，原始卷格式，明确勾选与精确删除确认。 |
+| [MacOS](./MacOS/README.md) | 拆分、合并各一个功能文件夹，入口与各自 README 同级；原始卷格式，明确勾选与精确删除确认。 |
 | [WindowsOS](./WindowsOS/README.md) | PowerShell + CMD 的分卷、合并和 Common 模块，默认原始卷，保留旧清单 / gzip。 |
 | [Releases](https://github.com/JobsKits/WindowsOS_11/releases) | 仅镜像完整 ISO 或原有镜像分卷；不再存放工具 ZIP 或单脚本附件。 |
 
