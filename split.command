@@ -1,15 +1,18 @@
 #!/bin/zsh
 # 脚本自述：
-# - 脚本名称：split.command
-# - 核心用途：按上限将当前目录的大文件拆成可由 merge.command 还原的分卷。
+# - 脚本名称：Jobs 文件拆分（运行时按当前文件名显示）。
+# - 核心用途：拖入单文件或目录，按上限拆成可由 Jobs 合并工具还原的分卷。
 # - 影响范围：只新增分卷目录；校验成功后精确输入 YES 才删除源文件。
 # - 运行提示：先确认自述，再检查系统工具和 fzf；不安装软件或修改 Shell 配置。
 
+SCRIPT_VERSION="2026.10.28"
+SCRIPT_SOURCE_PATH="$0"
 SCRIPT_DIR=""
 SCRIPT_PATH=""
-SCRIPT_BASENAME="split"
+SCRIPT_BASENAME=""
 LOG_FILE=""
 TARGET_DIR=""
+TARGET_FILE=""
 MAX_CHUNK_BYTES=$((50 * 1024 * 1024))
 MAX_CHUNK_LABEL="50 MiB"
 STANDARD_QUERY=""
@@ -19,6 +22,14 @@ FZF_LINES=()
 LARGE_FILES=()
 SELECTED_FILES=()
 ACTIVE_STAGING_DIR=""
+
+# 在自述之前只解析脚本位置，不创建日志或修改目标。
+prepare_display() {
+  SCRIPT_PATH="${SCRIPT_SOURCE_PATH:A}"
+  SCRIPT_DIR="${SCRIPT_PATH:h}"
+  SCRIPT_BASENAME="${SCRIPT_PATH:t:r}"
+  LOG_FILE="${TMPDIR:-/tmp}/${SCRIPT_BASENAME}.log"
+}
 
 # 按终端能力显示自述，日志始终保留可搜索的纯文本。
 print_styled() {
@@ -33,7 +44,7 @@ print_styled() {
 log() {
   local message="$1"
   print_styled "${2:-0}" "$message"
-  [[ -z "$LOG_FILE" ]] || printf '%s\n' "$message" >> "$LOG_FILE"
+  [[ "${LOG_READY:-0}" != 1 ]] || printf '%s\n' "$message" >> "$LOG_FILE"
 }
 # 以信息级别记录当前处理状态。
 info_echo() {
@@ -53,13 +64,15 @@ error_echo() {
 }
 # 第一屏说明影响范围，确认之前不创建日志或写入目标。
 show_script_intro_and_wait() {
-  print_styled '1;31' '======== 大文件拆分脚本（split.command）========'
-  print_styled '0;34' '1、选择目标目录、分卷上限和待拆分文件，不递归子目录。'
+  prepare_display
+  print_styled '1;31' "======== Jobs 文件拆分（${SCRIPT_PATH:t}）========"
+  print_styled '0;34' "工具版本：$SCRIPT_VERSION"
+  print_styled '0;34' '1、拖入单文件或目录，或用一个位置参数指定；目录模式不递归子目录。'
   print_styled '0;34' '2、分卷上限：50 MiB、100 MiB、1900 MiB 或自定义 MiB。'
   print_styled '0;34' '3、先在独占临时目录生成分卷，大小和 SHA-256 校验成功后发布。'
   print_styled '0;34' '4、已有分卷目录不覆盖；删除源文件必须精确输入 YES，回车保留。'
   print_styled '0;34' '5、仅检查系统工具与 fzf，不安装或升级软件，不修改 Shell 配置。'
-  print_styled '0;34' '日志：系统临时目录中的 split.log；Ctrl+C 可取消。'
+  print_styled '0;34' "日志：${LOG_FILE}；Ctrl+C 可取消。"
   if [[ ! -t 0 ]]; then
     print_styled '1;31' '✖ 缺少可交互输入，请在终端中运行。'
     exit 1
@@ -70,11 +83,10 @@ show_script_intro_and_wait() {
 # 确认后初始化运行选项、相对定位和日志。
 initialize_runtime() {
   setopt NO_NOMATCH ERR_EXIT PIPE_FAIL
-  local script_source="${(%):-%x}"
-  SCRIPT_PATH="${script_source:A}"
+  SCRIPT_PATH="${SCRIPT_SOURCE_PATH:A}"
   SCRIPT_DIR="${SCRIPT_PATH:h}"
-  LOG_FILE="${TMPDIR:-/tmp}/split.log"
   : > "$LOG_FILE"
+  LOG_READY=1
   trap 'handle_interruption INT' INT
   trap 'handle_interruption TERM' TERM
 }
@@ -88,7 +100,7 @@ handle_interruption() {
 # 验证真实执行所需工具及当前 fzf 选项，不触发安装或升级。
 check_environment() {
   local executable probe_rc=0
-  for executable in /usr/bin/split /usr/bin/stat /usr/bin/shasum /usr/bin/find /usr/bin/mktemp /bin/cat /bin/mv; do
+  for executable in /usr/bin/split /usr/bin/stat /usr/bin/shasum /usr/bin/find /usr/bin/mktemp /bin/cat /bin/mv /usr/bin/osascript; do
     if [[ ! -x "$executable" ]]; then
       error_echo "系统工具不可用：$executable"
       exit 1
@@ -108,11 +120,11 @@ check_environment() {
   info_echo "环境检查完成；日志：$LOG_FILE"
 }
 # 原路径优先，再安全解析拖入引用和转义；不执行输入中的任何代码。
-normalize_directory_input() {
-  local input="$1" candidate="$1"
+normalize_target_input() {
+  local candidate="$1"
   local -a tokens=()
   REPLY=''
-  if [[ -d "$candidate" ]]; then
+  if [[ ( -d "$candidate" || -f "$candidate" ) && ! -L "$candidate" ]]; then
     REPLY="${candidate:A}"
     return 0
   fi
@@ -122,43 +134,50 @@ normalize_directory_input() {
   while [[ "$candidate" == *[\ $'\t\r\n\u00a0\u3000'] ]]; do
     candidate="${candidate[1,-2]}"
   done
-  if [[ -z "$candidate" ]]; then
-    REPLY="$SCRIPT_DIR"
-    return 0
-  fi
-  if [[ -d "$candidate" ]]; then
+  [[ -n "$candidate" ]] || { REPLY="$SCRIPT_DIR"; return 0; }
+  if [[ ( -d "$candidate" || -f "$candidate" ) && ! -L "$candidate" ]]; then
     REPLY="${candidate:A}"
     return 0
   fi
   tokens=("${(@z)candidate}")
-  if (( ${#tokens} != 1 )); then
-    error_echo '一次只接受一个目录；请将带空格的路径拖入终端或用引号包裹。'
-    return 1
-  fi
+  (( ${#tokens} == 1 )) || return 1
   candidate="${(Q)tokens[1]}"
-  if [[ "$candidate" == '~/'* ]]; then
-    candidate="${HOME}/${candidate#'~/'}"
-  fi
-  if [[ ! -d "$candidate" ]]; then
-    error_echo "指定路径不是有效目录：$input"
-    return 1
-  fi
+  [[ "$candidate" != '~/'* ]] || candidate="${HOME}/${candidate#'~/'}"
+  [[ ( -d "$candidate" || -f "$candidate" ) && ! -L "$candidate" ]] || return 1
   REPLY="${candidate:A}"
 }
 # 接收一个目标目录，空输入默认使用脚本所在目录。
 choose_target_directory() {
   local input=''
-  log '➤ 拖入一个目标目录后回车；直接回车使用脚本所在目录。'
-  log "默认目录：$SCRIPT_DIR"
+  (( $# <= 1 )) || { error_echo '只接受一个单文件或目录位置参数。'; return 1; }
   while true; do
-    IFS= read -r input || exit 1
-    if normalize_directory_input "$input"; then
-      TARGET_DIR="$REPLY"
-      break
+    if (( $# == 1 )); then
+      input="$1"
+    else
+      log "➤ 拖入单文件或目录；直接回车使用：$SCRIPT_DIR"
+      IFS= read -r input || return 1
     fi
-    log '➤ 请重新拖入一个有效目录，或按 Ctrl+C 取消：'
+    if normalize_target_input "$input"; then
+      if [[ -f "$REPLY" ]]; then
+        TARGET_FILE="$REPLY"
+        TARGET_DIR="${REPLY:h}"
+        info_echo "单文件模式：$TARGET_FILE；分卷生成在源文件同级的新目录。"
+      else
+        TARGET_FILE=''
+        TARGET_DIR="$REPLY"
+        info_echo "目录模式：$TARGET_DIR；仅处理随后明确勾选的文件。"
+      fi
+      return 0
+    fi
+    error_echo '不是有效的普通单文件或目录；支持引号、拖入转义和尾随空白，不接受符号链接。'
+    (( $# == 0 )) || return 1
   done
-  info_echo "本次目标目录：$TARGET_DIR"
+}
+# 目标输入失败时立即停止，避免随后扫描默认目录。
+require_target_directory() {
+  if ! choose_target_directory "$@"; then
+    exit 1
+  fi
 }
 # 保留 fzf 空查询和空按键行，以区分返回、空选与选择器失败。
 parse_fzf_output() {
@@ -232,6 +251,16 @@ choose_split_standard() {
 find_large_files() {
   local file='' size=0 filename=''
   LARGE_FILES=()
+  if [[ -n "$TARGET_FILE" ]]; then
+    [[ -f "$TARGET_FILE" && ! -L "$TARGET_FILE" ]] || { error_echo '指定文件已失效。'; return 1; }
+    size="$(/usr/bin/stat -f %z "$TARGET_FILE")" || return 1
+    if (( size > MAX_CHUNK_BYTES )); then
+      LARGE_FILES=("$TARGET_FILE")
+      return 0
+    fi
+    info_echo "指定文件未超过 $MAX_CHUNK_LABEL；可返回调低上限。"
+    return 2
+  fi
   while IFS= read -r -d '' file; do
     filename="${file:t}"
     [[ "$filename" == .* ]] && continue
@@ -340,6 +369,22 @@ confirm_delete_source() {
     return 1
   fi
 }
+# 以系统排他重命名发布整个目录，目标并发出现时失败，不套入已有目录。
+publish_directory_exclusively() {
+  /usr/bin/osascript -l JavaScript - "$1" "$2" <<'JOBS_RENAME'
+ObjC.import('Foundation');
+ObjC.bindFunction('renamex_np', ['int', ['char *', 'char *', 'unsigned int']]);
+ObjC.bindFunction('__error', ['int *', []]);
+ObjC.bindFunction('strerror', ['char *', ['int']]);
+function run(args) {
+  if ($.renamex_np(args[0], args[1], 4) !== 0) {
+    var code = $.__error()[0];
+    throw new Error('排他发布失败（' + code + '）：' + $.strerror(code));
+  }
+}
+JOBS_RENAME
+}
+
 # 在独占临时目录拆分并验证，完整目录只在校验通过后发布一次。
 split_one_file() {
   local file="$1" filename="${1:t}" parent_dir="${1:h}" base_no_ext='' output_dir=''
@@ -417,7 +462,7 @@ split_one_file() {
     error_echo "发布前发现目标已存在；保留临时结果：$staging_dir"
     return 1
   fi
-  if ! /bin/mv -hn "$staging_dir" "$output_dir" || [[ -d "$staging_dir" ]]; then
+  if ! publish_directory_exclusively "$staging_dir" "$output_dir" 2>> "$LOG_FILE"; then
     error_echo "分卷发布失败；保留临时结果：$staging_dir"
     return 1
   fi
@@ -487,6 +532,11 @@ plan_and_split() {
       return 1
     fi
     (( selection_rc == 0 )) || return 1
+    if [[ -n "$TARGET_FILE" ]]; then
+      SELECTED_FILES=("$TARGET_FILE")
+      run_selected_files
+      return $?
+    fi
     selection_rc=0
     select_large_files || selection_rc=$?
     (( selection_rc == 3 )) && continue
@@ -504,7 +554,7 @@ main() {
   show_script_intro_and_wait # 首先显示用途与影响范围，回车确认后继续。
   initialize_runtime # 确认后初始化日志、脚本定位和运行选项。
   check_environment # 验证系统工具及 fzf，缺失时安全停止。
-  choose_target_directory # 接收拖入目录，空输入使用脚本目录。
+  require_target_directory "$@" # 接收单文件、目录或位置参数。
   plan_and_split # 先完成可返回的选择，再拆分并校验已选文件。
 }
 

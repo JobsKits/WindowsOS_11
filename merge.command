@@ -1,15 +1,19 @@
 #!/bin/zsh
 # 脚本自述：
-# - 脚本名称：merge.command（Jobs 子卷合并）。
+# - 脚本名称：Jobs 子卷合并（运行时按当前文件名显示）。
 # - 核心用途：识别当前目录及一级子目录的 文件名@序号of总数，逐组校验并按数字顺序合并。
 # - 影响范围：在目标目录发布完整文件；已有文件不覆盖，仅输入 YES 才删除本组分卷。
 # - 运行提示：先阅读内置自述并回车；依赖只检查，不安装或升级；Ctrl+C 随时停止。
 
+SCRIPT_VERSION="2026.10.28"
+SCRIPT_SOURCE_PATH="$0"
 SCRIPT_DIR=""
 SCRIPT_PATH=""
-SCRIPT_BASENAME="merge"
+SCRIPT_BASENAME=""
 LOG_FILE=""
 TARGET_DIR=""
+TARGET_EXPLICIT=0
+TARGET_IS_VOLUME_DIR=0
 USE_COLOR=0
 NORMALIZED_DIR=""
 PARSED_NAME=""
@@ -24,9 +28,9 @@ GROUP_BYTES=0
 ACTIVE_TEMP=""
 # 准备自述需要的路径和颜色，不写文件或改变工作目录。
 prepare_display() {
-  local script_source="${(%):-%x}"
-  SCRIPT_PATH="${script_source:A}"
+  SCRIPT_PATH="${SCRIPT_SOURCE_PATH:A}"
   SCRIPT_DIR="${SCRIPT_PATH:h}"
+  SCRIPT_BASENAME="${SCRIPT_PATH:t:r}"
   LOG_FILE="${TMPDIR:-/tmp}/${SCRIPT_BASENAME}.log"
   if [[ -t 1 && -n "${TERM:-}" && "${TERM:-}" != dumb && -z "${NO_COLOR+x}" ]]; then
     USE_COLOR=1
@@ -47,10 +51,11 @@ message() {
 # 首屏展示用途与删除边界，确认前不进行真实业务。
 show_script_intro_and_wait() {
   prepare_display
-  message '======== Jobs 子卷合并（merge.command）========' '1;31'
-  message '1、扫描目标目录及一级子目录，兼容 Release 平铺分卷和 split 生成的子目录。' '0;34'
+  message "======== Jobs 子卷合并（${SCRIPT_PATH:t}）========" '1;31'
+  message "工具版本：$SCRIPT_VERSION" '0;34'
+  message '1、拖入目录或用一个位置参数指定；扫描本层与一级子目录，兼容平铺及分卷目录。' '0;34'
   message '2、按完整原文件名分组，检查总数、重复及缺号；按数字卷号合并，兼容补零编号。' '0;34'
-  message '3、在目标目录生成完整文件；同名目标保留并报错，失败候选保留供排查。' '0;34'
+  message '3、显式指定分卷目录时在父目录还原；扫描父目录或默认目录时在该目录输出。' '0;34'
   message '4、默认保留分卷；只有精确输入 YES 才删除本组分卷，不递归删除目录。' '0;34'
   message '5、只检查本机 fzf 和系统命令，不安装、不升级、不修改 Shell 配置。' '0;34'
   message "日志：${LOG_FILE}；按 Ctrl+C 退出。" '0;34'
@@ -122,20 +127,34 @@ normalize_directory_input() {
 # 接收单个拖入目录，空行使用脚本目录，输入无效可重试。
 choose_target_directory() {
   local input=""
+  (( $# <= 1 )) || { message '✖ 只接受一个目录位置参数。' '1;31'; return 1; }
   while true; do
-    message "➤ 拖入一个目标目录，直接回车使用：$SCRIPT_DIR"
-    IFS= read -r input || exit 1
+    if (( $# == 1 )); then
+      input="$1"
+    else
+      message "➤ 拖入父目录或分卷目录；直接回车扫描脚本目录：$SCRIPT_DIR"
+      IFS= read -r input || return 1
+    fi
     if [[ -z "$input" ]]; then
       TARGET_DIR="$SCRIPT_DIR"
+      TARGET_EXPLICIT=0
       break
     fi
     if normalize_directory_input "$input"; then
       TARGET_DIR="$NORMALIZED_DIR"
+      TARGET_EXPLICIT=1
       break
     fi
     message '✖ 不是有效的单个目录；支持引号、拖入转义和尾随空白，请重新输入。' '1;31'
+    (( $# == 0 )) || return 1
   done
-  message "ℹ 目标目录：$TARGET_DIR"
+  message "ℹ 扫描目录：$TARGET_DIR"
+}
+# 目标输入失败时立即停止，避免随后扫描默认目录。
+require_target_directory() {
+  if ! choose_target_directory "$@"; then
+    exit 1
+  fi
 }
 # 从最后一个合法后缀解析完整原文件名，保留名称中的 @。
 parse_volume_name() {
@@ -173,6 +192,11 @@ find_volume_groups() {
   GROUP_DIRS=()
   GROUP_NAMES=()
   scan_volume_directory "$TARGET_DIR"
+  TARGET_IS_VOLUME_DIR=0
+  if (( TARGET_EXPLICIT && ${#GROUP_NAMES} > 0 )); then
+    TARGET_IS_VOLUME_DIR=1
+    message "ℹ 当前目录直接包含分卷，其本层组将还原到父目录：${TARGET_DIR:h}"
+  fi
   local dir=""
   while IFS= read -r -d '' dir; do
     case "${dir:t}" in
@@ -284,7 +308,7 @@ check_chunk_states() {
 }
 # 只删除已合并且未变化的精确清单，空子目录才尝试移除。
 offer_delete_chunks() {
-  local dir="$1" answer="" file
+  local dir="$1" output_dir="$2" answer="" file
   message '⚠ 默认保留分卷。删除本组分卷请输入 YES；回车、其它输入或 EOF 均保留。' '1;33'
   IFS= read -r answer || answer=""
   if [[ "$answer" != YES ]]; then
@@ -301,14 +325,18 @@ offer_delete_chunks() {
       return 1
     fi
   done
-  if [[ "$dir" != "$TARGET_DIR" ]]; then
+  if [[ "$dir" != "$output_dir" ]]; then
     /bin/rmdir "$dir" 2>/dev/null || message "ℹ 目录仍有其它内容，保留：$dir"
   fi
   message '✔ 已删除本组分卷；其它文件保留。' '1;32'
 }
 # 写入独占候选，核对大小与流摘要后以硬链接原子发布。
 merge_one_group() {
-  local dir="$1" name="$2" output="$TARGET_DIR/$2"
+  local dir="$1" name="$2" output_dir="$TARGET_DIR" output=""
+  if (( TARGET_IS_VOLUME_DIR )) && [[ "$dir" == "$TARGET_DIR" ]]; then
+    output_dir="${TARGET_DIR:h}"
+  fi
+  output="$output_dir/$name"
   local stream_hash="" output_hash="" output_size=0
   message "➤ 分卷来源：$dir；原文件名：$name"
   validate_group "$dir" "$name" || return 1
@@ -316,7 +344,7 @@ merge_one_group() {
     message "✖ 目标已存在，保留原文件，拒绝覆盖：$output" '1;31'
     return 1
   fi
-  ACTIVE_TEMP="$(mktemp "$TARGET_DIR/.merge.XXXXXXXX")" || return 1
+  ACTIVE_TEMP="$(mktemp "$output_dir/.merge.XXXXXXXX")" || return 1
   message "ℹ 按卷号合并 ${#CHUNKS} 卷，共 $GROUP_BYTES 字节；目标：$output"
   if ! stream_hash="$(stream_chunks | tee "$ACTIVE_TEMP" | shasum -a 256)"; then
     message "✖ 读取或写入失败，保留未发布候选：$ACTIVE_TEMP" '1;31'
@@ -337,7 +365,7 @@ merge_one_group() {
   ACTIVE_TEMP=""
   message "✔ 已合并：$output；SHA-256：${output_hash%% *}" '1;32'
   message 'ℹ 此校验确认复制内容一致；没有可信原文件摘要时，不能据此验证镜像来源。'
-  offer_delete_chunks "$dir"
+  offer_delete_chunks "$dir" "$output_dir"
 }
 # 批量处理选中分组，保留失败状态并报告真实汇总。
 merge_selected_groups() {
@@ -357,7 +385,7 @@ main() {
   show_script_intro_and_wait # 先展示用途与影响，等待回车后继续。
   initialize_runtime # 确认后初始化日志和中断处理。
   check_environment # 只检查实际依赖，不安装或修改环境。
-  choose_target_directory # 解析拖入路径或使用脚本目录。
+  require_target_directory "$@" # 解析目录参数或拖入路径，默认扫描脚本目录。
   find_volume_groups # 识别平铺与一级子目录分卷。
   select_volume_groups # 明确勾选分卷组，空选和取消不执行。
   merge_selected_groups # 按组校验合并并传播失败状态。
