@@ -23,7 +23,7 @@ Jobs 维护的 Windows 11 镜像资料子仓。父仓 [WindowsOS](../README.md) 
 
 - 根快捷入口转交 `MacOS/【MacOS】⏬下载当前仓库Release.command/【MacOS】⏬下载当前仓库Release.command`，先阅读自述、回车继续，再通过 [**fzf**](https://formulae.brew.sh/formula/fzf) 选择版本和附件；最终下载提示后，空行或纯空白（含 Space／Tab）后回车开始，仅包含非空白文本的回答不执行。
 - 只检查依赖，不自动安装；需要系统 [**zsh**](https://www.zsh.org/)、[**Git**](https://git-scm.com/)、[**curl**](https://curl.se/)、[**jq**](https://jqlang.org/)、shasum 和 fzf。`--help` 查看帮助，`--list` 只读查询本仓全部发布版本及附件，无需 fzf。
-- 选中任意 ISO 分卷时补齐同组，支持断点续传、大小及 API 可用的 SHA-256 校验；已有完整文件校验后跳过，同名冲突保留并停止。全部完成后仅执行同版目录已有的 `merge.command`；缺失正常跳过，不补下载或复制合并工具。
+- 选中任意 ISO 分卷时补齐同组，支持断点续传、大小及 API 可用的 SHA-256 校验；已有完整文件校验后跳过，同名冲突保留并停止。所选附件全部下载或校验通过后，存在总卷数大于 1 的 ISO 分卷时自动调用 [MacOS 功能包内的 merge.command](./MacOS/merge.command/merge.command)，传入本次 Release 目录并将合并产物留在该目录。单个文件、多个独立 ISO 或 `@1of1` 不合并；缺少有效合并入口会报错并保留下载文件。
 
 ### [【WindowsOS】⏬下载当前仓库Release.cmd](<./【WindowsOS】⏬下载当前仓库Release.cmd>)
 
@@ -42,7 +42,7 @@ Jobs 维护的 Windows 11 镜像资料子仓。父仓 [WindowsOS](../README.md) 
 | `README.md`、`LICENSE` | 仓库说明与许可证文件。 |
 | `Releases/<标签>/` | 本仓或父仓下载入口确认后生成的附件目录，通过本仓本地 Git 排除规则忽略。 |
 | `Windows11_Client_arm64_zh-cn_26300_9457/` | 原有已跟踪镜像分卷目录；同一版本附件也在 Releases 中提供。 |
-| `merge.command`、`split.command` | 根目录保留的 macOS 兼容入口，与 `MacOS/` 下对应命令同字节，自包含运行。 |
+| `MacOS/`、`WindowsOS/` | 各自外层提供平台前缀的合并、分卷与下载快捷入口；实施逻辑保留在对应功能包内。根目录不保留 `merge.command`、`split.command`。 |
 
 [Windows 11 ARM64 简体中文 26300.9457](https://github.com/JobsKits/WindowsOS_11/releases/tag/Windows11_Client_arm64_zh-cn_26300_9457) 包含 169 个镜像分卷；双端工具改由本 Git 仓库提供。通过父仓[克隆与下载入口](../【MacOS】⬆️克隆WindowsOS子仓.command)选择 `WindowsOS_11`；已有子仓时可直接使用 [Release 下载入口](<../【MacOS】⏬按需下载WindowsOS Release.command>)。附件下载与 Git 同步分别选择。
 
@@ -51,6 +51,8 @@ Jobs 维护的 Windows 11 镜像资料子仓。父仓 [WindowsOS](../README.md) 
 | 路径 | 职责 |
 | --- | --- |
 | [MacOS](./MacOS/README.md) | 拆分、合并各一个功能文件夹，入口与各自 README 同级；原始卷格式，明确勾选与精确删除确认。 |
+| MacOS 外层快捷入口 | [子卷合并](<./MacOS/【MacOS】子卷合并.command>)、[源文件压缩分卷](<./MacOS/【MacOS】源文件压缩分卷.command>)、[下载 Release](<./MacOS/【MacOS】⏬下载Release.command>)；按相对路径转发到本平台唯一实施脚本。 |
+| WindowsOS 外层快捷入口 | [子卷合并](<./WindowsOS/【WindowsOS】子卷合并.cmd>)、[源文件压缩分卷](<./WindowsOS/【WindowsOS】源文件压缩分卷.cmd>)、[下载 Release](<./WindowsOS/【WindowsOS】⏬下载Release.cmd>)；按相对路径转发到本平台对应功能包。 |
 | [WindowsOS](./WindowsOS/README.md) | PowerShell + CMD 的分卷、合并和 Common 模块，默认原始卷，保留旧清单 / gzip。 |
 | [Releases](https://github.com/JobsKits/WindowsOS_11/releases) | 仅镜像完整 ISO 或原有镜像分卷；不再存放工具 ZIP 或单脚本附件。 |
 
@@ -58,15 +60,15 @@ Jobs 维护的 Windows 11 镜像资料子仓。父仓 [WindowsOS](../README.md) 
 
 > **目的：** 按上限拆分明确指定的文件，或按完整分卷组还原。
 
-- 在 macOS 双击或以 `/bin/zsh` 运行两个命令；可传一个位置参数或启动后拖入文件 / 目录。
-- 上限为 50 / 100 / 1900 MiB 或自定义；目录只处理明确勾选对象。显式分卷目录在父目录还原，父目录中的子组输出到所输入父目录。
+- 在 MacOS 双击 `MacOS/` 外层的分卷／合并快捷入口，或以 `/bin/zsh` 运行；可传一个位置参数或启动后拖入文件 / 目录。快捷入口仅按相对路径转交功能包，不复制业务，整仓可迁移。
+- 上限为 50 / 100 / 1900 MiB 或自定义；目录只处理明确勾选对象。显式分卷目录在父目录还原，父目录中的子组输出到所输入父目录；`--release-dir <目录>` 将产物留在指定目录。合并路径无效或无分卷时持续询问，关闭终端、`Ctrl+C` 或输入结束可停止。
 - 大小、SHA-256 和输入状态通过后无覆盖发布。默认保留原件，成功后精确 `YES` 才删除对应清单；失败保留候选。
 
 ### [WindowsOS 分卷与合并](./WindowsOS/README.md)
 
 > **目的：** 使用原生 PowerShell / CMD 处理互通原始卷，并保留旧清单模式。
 
-- 双击两个功能目录中的 `.cmd`，或运行同名 `.ps1`；拆分支持单文件、目录、`-Path`、`-LimitMiB`，合并支持分卷目录或其父目录。
+- 双击 `WindowsOS/` 外层的分卷／合并 `.cmd` 快捷入口，或进入功能包运行同名 `.cmd`／`.ps1`；拆分支持单文件、目录、`-Path`、`-LimitMiB`，合并支持分卷目录或其父目录。
 - 默认 `完整原文件名@序号of总数`，按数字顺序合并并核对缺卷、重号、大小和 SHA-256；现有结果拒绝覆盖，原件始终保留。
 - `-LegacyManifest` 使用旧 `JobsSplit-1` 清单 / gzip，不与 `-Path` / `-LimitMiB` 混用；`-Check` 只读检查。普通操作先回车阅读自述、写入前精确 `YES`，fzf 取消不执行。
 
@@ -80,6 +82,6 @@ Jobs 维护的 Windows 11 镜像资料子仓。父仓 [WindowsOS](../README.md) 
 cd573df724862300895d0f5d0836e663756d22cc4e964c752efdc05b4fc09e8b
 ```
 
-工具源码位于本 Git 仓库的 `MacOS/` 与 `WindowsOS/`；根目录 Mac 命令保留兼容。MacOS 下载入口仅在同版目录已有 `merge.command` 时调用合并；WindowsOS 下载入口完成后手工合并。均不挂载镜像或安装系统。
+工具源码位于本 Git 仓库的 `MacOS/` 与 `WindowsOS/`；版本根下载快捷入口继续保留。MacOS 下载入口完成全部校验后，存在多卷 ISO 时调用 `MacOS/merge.command/merge.command` 并将产物留在本次下载目录；WindowsOS 下载入口完成后手工合并。均不挂载镜像或安装系统。
 
 <a id="🔚" href="#前言" style="font-size:17px; color:green; font-weight:bold;">我是有底线的➤点我回到首页</a>
